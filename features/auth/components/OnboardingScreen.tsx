@@ -6,16 +6,21 @@ import {
   Pressable,
   StyleSheet,
   ScrollView,
-  KeyboardAvoidingView,
-  Platform,
+  Alert,
+  ActivityIndicator,
 } from "react-native";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import { Check, ChevronLeft, ChevronRight, Upload } from "lucide-react-native";
 import { Logo } from "@/components/Logo";
-import { colors } from "@/constants/theme";
+import { brandLinearGradient, colors } from "@/constants/theme";
+import { api } from "@/lib/api";
+import { setAccessToken, setStoredUser } from "@/lib/storage";
+import type { StoredUser } from "@/lib/storage";
 
 const movieGenres = [
   "Action",
@@ -53,6 +58,7 @@ const popularMovies = [
 
 export function OnboardingScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [currentStep, setCurrentStep] = useState(0);
 
   const [accountData, setAccountData] = useState({
@@ -69,6 +75,7 @@ export function OnboardingScreen() {
 
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
   const [selectedMovies, setSelectedMovies] = useState<number[]>([]);
+  const [submitting, setSubmitting] = useState(false);
 
   const pickAvatar = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -84,11 +91,41 @@ export function OnboardingScreen() {
     }
   };
 
-  const handleNext = () => {
+  const handleNext = async () => {
     if (currentStep < 3) {
       setCurrentStep(currentStep + 1);
-    } else {
+      return;
+    }
+
+    // Final step — call the signup API
+    try {
+      setSubmitting(true);
+      const response = await api.post<{ accessToken: string; user: StoredUser }>(
+        "/auth/signup",
+        {
+          name: accountData.name,
+          email: accountData.email,
+          password: accountData.password,
+          username: profileData.username,
+          bio: profileData.bio || undefined,
+          profilePictureUrl: profileData.profilePicture || undefined,
+          genres: selectedGenres,
+          watchedMovieIds: selectedMovies,
+        }
+      );
+
+      // Persist token and user to MMKV
+      setAccessToken(response.accessToken);
+      setStoredUser(response.user);
+
       router.replace("/feed");
+    } catch (err) {
+      Alert.alert(
+        "Sign up failed",
+        err instanceof Error ? err.message : "Please try again."
+      );
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -134,14 +171,12 @@ export function OnboardingScreen() {
       colors={[colors.gradientStart, colors.gradientMid, colors.gradientStart]}
       style={styles.gradient}
     >
-      <KeyboardAvoidingView
+      <KeyboardAwareScrollView
         style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        contentContainerStyle={[styles.scroll, { paddingTop: insets.top + 16 }]}
+        keyboardShouldPersistTaps="handled"
+        bottomOffset={16}
       >
-        <ScrollView
-          contentContainerStyle={styles.scroll}
-          keyboardShouldPersistTaps="handled"
-        >
           <View style={styles.logoWrap}>
             <Logo size="lg" />
           </View>
@@ -153,7 +188,15 @@ export function OnboardingScreen() {
             <Text style={styles.muted}>{Math.round(progress)}%</Text>
           </View>
           <View style={styles.track}>
-            <View style={[styles.fill, { width: `${progress}%` }]} />
+            <View style={[styles.fillClip, { width: `${progress}%` }]}>
+              <LinearGradient
+                colors={brandLinearGradient.colors}
+                locations={[...brandLinearGradient.locations]}
+                start={brandLinearGradient.start}
+                end={brandLinearGradient.end}
+                style={styles.fillGradient}
+              />
+            </View>
           </View>
 
           <View style={styles.card}>
@@ -372,20 +415,50 @@ export function OnboardingScreen() {
             )}
             <Pressable
               onPress={handleNext}
-              disabled={!canProceed()}
-              style={[
-                styles.nextBtn,
-                !canProceed() && styles.nextBtnDisabled,
+              disabled={!canProceed() || submitting}
+              style={({ pressed }) => [
+                styles.nextBtnPressable,
+                (!canProceed() || submitting) && styles.nextBtnDisabled,
+                pressed && canProceed() && !submitting && styles.nextBtnPressed,
               ]}
             >
-              <Text style={styles.nextText}>
-                {currentStep === 3 ? "Finish" : "Next"}
-              </Text>
-              <ChevronRight width={20} height={20} color="#fff" />
+              <LinearGradient
+                colors={
+                  canProceed() && !submitting
+                    ? brandLinearGradient.colors
+                    : ["#1F2937", "#1F2937"]
+                }
+                locations={
+                  canProceed() && !submitting
+                    ? [...brandLinearGradient.locations]
+                    : [0, 1]
+                }
+                start={brandLinearGradient.start}
+                end={brandLinearGradient.end}
+                style={styles.nextBtnGradient}
+              >
+                {submitting ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <>
+                    <Text style={styles.nextText}>
+                      {currentStep === 3 ? "Finish" : "Next"}
+                    </Text>
+                    <ChevronRight width={20} height={20} color="#fff" />
+                  </>
+                )}
+              </LinearGradient>
             </Pressable>
           </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
+          {currentStep === 0 && (
+            <View style={styles.loginRow}>
+              <Text style={styles.loginPrompt}>Already have an account?</Text>
+              <Pressable onPress={() => router.push("/login")}>
+                <Text style={styles.loginLink}> Log In</Text>
+              </Pressable>
+            </View>
+          )}
+      </KeyboardAwareScrollView>
     </LinearGradient>
   );
 }
@@ -411,10 +484,15 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     marginBottom: 32,
   },
-  fill: {
+  fillClip: {
     height: "100%",
     borderRadius: 999,
-    backgroundColor: colors.accent,
+    overflow: "hidden",
+  },
+  fillGradient: {
+    width: "100%",
+    height: "100%",
+    borderRadius: 999,
   },
   card: {
     backgroundColor: "rgba(74, 74, 94, 0.35)",
@@ -550,18 +628,31 @@ const styles = StyleSheet.create({
     backgroundColor: "#1F2937",
   },
   backText: { color: "#fff", fontWeight: "500" },
-  nextBtn: {
+  nextBtnPressable: {
+    borderRadius: 8,
+    overflow: "hidden",
+  },
+  nextBtnGradient: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
     paddingVertical: 12,
     paddingHorizontal: 20,
     borderRadius: 8,
-    backgroundColor: colors.accent,
   },
   nextBtnDisabled: {
-    backgroundColor: "#1F2937",
-    opacity: 0.6,
+    opacity: 0.55,
   },
-  nextText: { color: "#fff", fontWeight: "600" },
+  nextBtnPressed: {
+    opacity: 0.92,
+  },
+  nextText: { color: "#fff", fontWeight: "600", fontSize: 16 },
+  loginRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    marginTop: 24,
+  },
+  loginPrompt: { color: "#9CA3AF", fontSize: 15 },
+  loginLink: { color: colors.accent, fontSize: 15, fontWeight: "600" },
 });

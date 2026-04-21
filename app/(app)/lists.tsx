@@ -4,7 +4,6 @@ export default function ListsRoute() {
   return (
     <PlaceholderScreen
       title="Custom Lists"
-      showBottomNav
       description="Port from WatchCueWeb/src/app/components/custom-lists.tsx."
     />
   );

@@ -2,33 +2,31 @@ import { View, Text, StyleSheet, Pressable } from "react-native";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChevronLeft } from "lucide-react-native";
-import { BottomNav } from "@/components/BottomNav";
-import { colors } from "@/constants/theme";
+import { useAppTheme } from "@/features/theme/ThemeContext";
 
 type Props = {
   title: string;
   description?: string;
-  /** Match WatchCueWeb: main tab surfaces show the bottom bar */
-  showBottomNav?: boolean;
   showBack?: boolean;
 };
 
 export function PlaceholderScreen({
   title,
   description = "This screen is wired for navigation. Port UI from WatchCueWeb when you are ready.",
-  showBottomNav = false,
   showBack = true,
 }: Props) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { colors } = useAppTheme();
 
   return (
     <View
       style={[
         styles.root,
         {
+          backgroundColor: colors.background,
           paddingTop: insets.top,
-          paddingBottom: showBottomNav ? 96 + insets.bottom : insets.bottom + 16,
+          paddingBottom: insets.bottom + 16,
         },
       ]}
     >
@@ -45,13 +43,12 @@ export function PlaceholderScreen({
         ) : (
           <View style={styles.headerSpacer} />
         )}
-        <Text style={styles.title} numberOfLines={1}>
+        <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
           {title}
         </Text>
         <View style={styles.headerSpacer} />
       </View>
-      <Text style={styles.desc}>{description}</Text>
-      {showBottomNav && <BottomNav />}
+      <Text style={[styles.desc, { color: colors.muted }]}>{description}</Text>
     </View>
   );
 }
@@ -59,7 +56,6 @@ export function PlaceholderScreen({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: colors.background,
     paddingHorizontal: 16,
   },
   header: {
@@ -74,11 +70,9 @@ const styles = StyleSheet.create({
     textAlign: "center",
     fontSize: 18,
     fontWeight: "700",
-    color: colors.text,
   },
   desc: {
     fontSize: 15,
     lineHeight: 22,
-    color: colors.muted,
   },
 });

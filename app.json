@@ -42,6 +42,13 @@
         {
           "photosPermission": "WatchCue uses your photo library to set your profile picture during onboarding."
         }
+      ],
+      [
+        "expo-video",
+        {
+          "supportsBackgroundPlayback": true,
+          "supportsPictureInPicture": true
+        }
       ]
     ],
     "experiments": {
