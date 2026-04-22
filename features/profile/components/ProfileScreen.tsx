@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -14,7 +15,7 @@ import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   Heart,
-  List,
+  List as ListIcon,
   MessageCircle,
   Pencil,
   Settings,
@@ -22,37 +23,70 @@ import {
 import { useAppTheme } from "@/features/theme/ThemeContext";
 import { brandLinearGradient } from "@/constants/theme";
 import type { AppColors } from "@/constants/theme";
-import { api } from "@/lib/api";
+import { api, mediaUrl } from "@/lib/api";
 import { getStoredUser } from "@/lib/storage";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface UserProfile {
   id: string;
-  name: string;
+  email?: string;
   username: string;
+  displayName: string;
   bio: string | null;
-  profilePictureUrl: string | null;
-  postCount: number;
-  followerCount: number;
+  avatarUrl: string | null;
+  followersCount: number;
   followingCount: number;
+  postCount: number;
+  createdAt: string;
 }
 
 interface ProfilePost {
   id: string;
-  title: string;
-  content: string;
-  likeCount: number;
-  commentCount: number;
+  title: string | null;
+  body: string;
+  mediaType: "none" | "image" | "video";
+  imageUrl: string | null;
+  videoUrl: string | null;
+  hasSpoiler: boolean;
+  likesCount: number;
+  commentsCount: number;
+  repostsCount: number;
   createdAt: string;
-  hub: { id: string; name: string } | null;
+  hub: { id: string; name: string; iconUrl: string | null } | null;
 }
+
+interface ProfileList {
+  id: string;
+  userId: string;
+  listType: "watchlist" | "watched" | "favorites" | "custom";
+  name: string;
+  emoji: string | null;
+  itemsCount: number;
+}
+
+interface ListItem {
+  listId: string;
+  hubId: string;
+  status: "watching" | "watch_next" | null;
+  addedAt: string;
+  hub: {
+    id: string;
+    name: string;
+    year: number | null;
+    iconUrl: string | null;
+    backdropUrl: string | null;
+  };
+}
+
+type WatchFilter = "all" | "watching" | "watched" | "watch_next";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
@@ -65,7 +99,21 @@ function formatCount(n: number): string {
   return String(n);
 }
 
-const LIMIT = 20;
+function gradientFor(seed: string): readonly [string, string, string] {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) | 0;
+  const palettes: readonly (readonly [string, string, string])[] = [
+    ["#ff7a8a", "#c8a2c8", "#7ed8c4"],
+    ["#ff6b6b", "#ffa07a", "#7ed8c4"],
+    ["#a18cd1", "#fbc2eb", "#7ed8c4"],
+    ["#ff9a9e", "#fad0c4", "#a1c4fd"],
+    ["#f6d365", "#fda085", "#fbc2eb"],
+    ["#84fab0", "#8fd3f4", "#a18cd1"],
+  ];
+  return palettes[Math.abs(hash) % palettes.length];
+}
+
+const PAGE_SIZE = 20;
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -75,78 +123,219 @@ export function ProfileScreen() {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
+  // Profile + posts
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [posts, setPosts] = useState<ProfilePost[]>([]);
-  const [total, setTotal] = useState(0);
+  const postsCursorRef = useRef<string | null>(null);
+  const postsInFlightRef = useRef(false);
+  const [hasMorePosts, setHasMorePosts] = useState(true);
+  const [loadingMorePosts, setLoadingMorePosts] = useState(false);
+
+  // Watchlist
+  const [lists, setLists] = useState<ProfileList[]>([]);
+  const [watchlistItems, setWatchlistItems] = useState<ListItem[]>([]);
+  const [watchedItems, setWatchedItems] = useState<ListItem[]>([]);
+  const [favoriteHubIds, setFavoriteHubIds] = useState<Set<string>>(new Set());
+  const [watchlistLoading, setWatchlistLoading] = useState(false);
+  const [watchFilter, setWatchFilter] = useState<WatchFilter>("all");
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [activeTab, setActiveTab] = useState<"posts" | "watchlist">("posts");
+
+  // ── Fetchers ──────────────────────────────────────────────────────────────
 
   const fetchProfile = useCallback(async () => {
     try {
       const data = await api.get<UserProfile>("/users/me");
       setProfile(data);
+      return data;
     } catch {
       const stored = getStoredUser();
       if (stored) {
-        setProfile({
+        const fallback: UserProfile = {
           id: stored.id,
-          name: stored.name,
+          email: stored.email,
           username: stored.username,
+          displayName: stored.name,
           bio: stored.bio,
-          profilePictureUrl: stored.profilePictureUrl,
-          postCount: 0,
-          followerCount: 0,
+          avatarUrl: stored.profilePictureUrl,
+          followersCount: 0,
           followingCount: 0,
-        });
+          postCount: 0,
+          createdAt: stored.createdAt,
+        };
+        setProfile(fallback);
+        return fallback;
       }
+      return null;
     }
   }, []);
 
   const fetchPosts = useCallback(
-    async (offset = 0, append = false) => {
-      if (!profile) return;
+    async (userId: string, cursor: string | null, reset: boolean) => {
       try {
-        const data = await api.get<{ posts: ProfilePost[]; total: number }>(
-          `/users/${profile.id}/posts?limit=${LIMIT}&offset=${offset}`
-        );
-        setPosts((prev) => (append ? [...prev, ...data.posts] : data.posts));
-        setTotal(data.total);
+        const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+        if (cursor) params.set("cursor", cursor);
+        const data = await api.get<{
+          posts: ProfilePost[];
+          nextCursor: string | null;
+          hasNextPage: boolean;
+        }>(`/users/${userId}/posts?${params.toString()}`);
+        const incoming = Array.isArray(data.posts) ? data.posts : [];
+        if (reset) {
+          setPosts(incoming);
+        } else {
+          setPosts((prev) => {
+            const seen = new Set(prev.map((p) => p.id));
+            const fresh = incoming.filter((p) => !seen.has(p.id));
+            return fresh.length === 0 ? prev : [...prev, ...fresh];
+          });
+        }
+        postsCursorRef.current = data.nextCursor ?? null;
+        setHasMorePosts(!!data.hasNextPage && !!data.nextCursor);
       } catch {
-        if (!append) setPosts([]);
+        if (reset) setPosts([]);
       }
     },
-    [profile]
+    [],
   );
 
+  const fetchAllListItems = useCallback(async (listId: string) => {
+    const acc: ListItem[] = [];
+    let cursor: string | null = null;
+    // Walk pages — list sizes are small in the MVP.
+    // Cap at 5 pages to avoid pathological loops.
+    for (let i = 0; i < 5; i++) {
+      const params = new URLSearchParams({ limit: "50" });
+      if (cursor) params.set("cursor", cursor);
+      const data = await api.get<{
+        items: ListItem[];
+        nextCursor: string | null;
+        hasNextPage: boolean;
+      }>(`/lists/${listId}/items?${params.toString()}`);
+      acc.push(...(data.items ?? []));
+      if (!data.hasNextPage || !data.nextCursor) break;
+      cursor = data.nextCursor;
+    }
+    return acc;
+  }, []);
+
+  const fetchWatchlist = useCallback(async () => {
+    setWatchlistLoading(true);
+    try {
+      const data = await api.get<{ defaults: ProfileList[]; custom: ProfileList[] }>(
+        "/lists",
+      );
+      const defaults = data.defaults ?? [];
+      setLists([...defaults, ...(data.custom ?? [])]);
+
+      const watchlistList = defaults.find((l) => l.listType === "watchlist");
+      const watchedList = defaults.find((l) => l.listType === "watched");
+      const favoritesList = defaults.find((l) => l.listType === "favorites");
+
+      const [w, d, f] = await Promise.all([
+        watchlistList ? fetchAllListItems(watchlistList.id) : Promise.resolve([]),
+        watchedList ? fetchAllListItems(watchedList.id) : Promise.resolve([]),
+        favoritesList ? fetchAllListItems(favoritesList.id) : Promise.resolve([]),
+      ]);
+      setWatchlistItems(w);
+      setWatchedItems(d);
+      setFavoriteHubIds(new Set(f.map((i) => i.hubId)));
+    } catch {
+      setWatchlistItems([]);
+      setWatchedItems([]);
+      setFavoriteHubIds(new Set());
+    } finally {
+      setWatchlistLoading(false);
+    }
+  }, [fetchAllListItems]);
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       setLoading(true);
-      await fetchProfile();
-      setLoading(false);
+      const me = await fetchProfile();
+      if (me && !cancelled) {
+        postsCursorRef.current = null;
+        await fetchPosts(me.id, null, true);
+      }
+      if (!cancelled) setLoading(false);
     })();
-  }, [fetchProfile]);
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchProfile, fetchPosts]);
 
+  // Lazy-fetch watchlist the first time the tab is opened
+  const watchlistFetchedRef = useRef(false);
   useEffect(() => {
-    if (profile) fetchPosts(0);
-  }, [profile, fetchPosts]);
+    if (activeTab === "watchlist" && !watchlistFetchedRef.current) {
+      watchlistFetchedRef.current = true;
+      fetchWatchlist();
+    }
+  }, [activeTab, fetchWatchlist]);
 
-  const onRefresh = async () => {
+  const onRefresh = useCallback(async () => {
+    if (!profile) return;
     setRefreshing(true);
-    await fetchProfile();
-    if (profile) await fetchPosts(0);
+    const me = await fetchProfile();
+    if (me) {
+      postsCursorRef.current = null;
+      await fetchPosts(me.id, null, true);
+    }
+    if (activeTab === "watchlist") {
+      await fetchWatchlist();
+    }
     setRefreshing(false);
-  };
+  }, [profile, fetchProfile, fetchPosts, activeTab, fetchWatchlist]);
 
-  const onEndReached = async () => {
-    if (loadingMore || posts.length >= total) return;
-    setLoadingMore(true);
-    await fetchPosts(posts.length, true);
-    setLoadingMore(false);
-  };
+  const onEndReached = useCallback(async () => {
+    if (
+      !profile ||
+      postsInFlightRef.current ||
+      !hasMorePosts ||
+      !postsCursorRef.current
+    )
+      return;
+    postsInFlightRef.current = true;
+    setLoadingMorePosts(true);
+    try {
+      await fetchPosts(profile.id, postsCursorRef.current, false);
+    } finally {
+      postsInFlightRef.current = false;
+      setLoadingMorePosts(false);
+    }
+  }, [profile, fetchPosts, hasMorePosts]);
 
-  // ── Post card ──────────────────────────────────────────────────────────────
+  // ── Watchlist filtering ────────────────────────────────────────────────────
+
+  const visibleWatchItems: ListItem[] = useMemo(() => {
+    switch (watchFilter) {
+      case "watched":
+        return watchedItems;
+      case "watching":
+        return watchlistItems.filter((i) => i.status === "watching");
+      case "watch_next":
+        return watchlistItems.filter((i) => i.status === "watch_next");
+      case "all":
+      default: {
+        // Union watchlist + watched, deduped by hubId.
+        const seen = new Set<string>();
+        const out: ListItem[] = [];
+        for (const it of [...watchlistItems, ...watchedItems]) {
+          if (seen.has(it.hubId)) continue;
+          seen.add(it.hubId);
+          out.push(it);
+        }
+        return out;
+      }
+    }
+  }, [watchFilter, watchlistItems, watchedItems]);
+
+  // ── Render: post card ─────────────────────────────────────────────────────
 
   const renderPost = useCallback(
     ({ item }: { item: ProfilePost }) => (
@@ -155,43 +344,107 @@ export function ProfileScreen() {
         onPress={() => router.push(`/post/${item.id}` as never)}
       >
         {item.hub && (
-          <Text style={styles.hubName}>{item.hub.name}</Text>
+          <Pressable
+            onPress={() =>
+              item.hub?.id && router.push(`/hub/${item.hub.id}` as never)
+            }
+            hitSlop={4}
+          >
+            <Text style={styles.hubName} numberOfLines={1}>
+              {item.hub.name}
+            </Text>
+          </Pressable>
         )}
-        <Text style={styles.postTitle} numberOfLines={2}>
-          {item.title}
-        </Text>
+        {item.title ? (
+          <Text style={styles.postTitle} numberOfLines={2}>
+            {item.title}
+          </Text>
+        ) : null}
         <Text style={styles.postContent} numberOfLines={2}>
-          {item.content}
+          {item.body}
         </Text>
         <View style={styles.postMeta}>
           <View style={styles.metaGroup}>
             <Heart size={14} color={colors.muted} />
-            <Text style={styles.metaText}>{formatCount(item.likeCount)}</Text>
+            <Text style={styles.metaText}>{formatCount(item.likesCount)}</Text>
           </View>
           <View style={styles.metaGroup}>
             <MessageCircle size={14} color={colors.muted} />
-            <Text style={styles.metaText}>
-              {formatCount(item.commentCount)}
-            </Text>
+            <Text style={styles.metaText}>{formatCount(item.commentsCount)}</Text>
           </View>
           <Text style={styles.metaDot}>·</Text>
           <Text style={styles.metaText}>{relativeTime(item.createdAt)}</Text>
         </View>
       </Pressable>
     ),
-    [styles, colors, router]
+    [styles, colors, router],
   );
 
-  // ── Header (rendered above the list) ───────────────────────────────────────
+  // ── Render: watchlist tile ────────────────────────────────────────────────
 
-  const ListHeader = useMemo(() => {
+  const renderWatchTile = useCallback(
+    (item: ListItem) => {
+      const backdrop = mediaUrl(item.hub.backdropUrl);
+      const icon = mediaUrl(item.hub.iconUrl);
+      const palette = gradientFor(item.hubId);
+      const isFavorite = favoriteHubIds.has(item.hubId);
+      return (
+        <Pressable
+          key={item.hubId}
+          style={styles.watchTile}
+          onPress={() => router.push(`/hub/${item.hubId}` as never)}
+        >
+          <View style={styles.watchArtwork}>
+            {backdrop ? (
+              <Image
+                source={{ uri: backdrop }}
+                style={StyleSheet.absoluteFill}
+                contentFit="cover"
+              />
+            ) : (
+              <LinearGradient
+                colors={palette}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={StyleSheet.absoluteFill}
+              />
+            )}
+            {icon && (
+              <Image
+                source={{ uri: icon }}
+                style={styles.watchIcon}
+                contentFit="contain"
+              />
+            )}
+            {isFavorite && (
+              <View style={styles.favoriteBadge}>
+                <Heart size={14} color="#fff" fill="#fff" />
+              </View>
+            )}
+          </View>
+          <Text style={styles.watchTitle} numberOfLines={1}>
+            {item.hub.name}
+          </Text>
+          {item.hub.year != null && (
+            <Text style={styles.watchYear}>{item.hub.year}</Text>
+          )}
+        </Pressable>
+      );
+    },
+    [styles, favoriteHubIds, router],
+  );
+
+  // ── Render: profile header ────────────────────────────────────────────────
+
+  const ProfileHeader = useCallback(() => {
     if (!profile) return null;
-    const initials = profile.name
+    const initials = (profile.displayName || profile.username || "?")
       .split(" ")
       .map((w) => w[0])
       .join("")
       .toUpperCase()
       .slice(0, 2);
+    const avatar = mediaUrl(profile.avatarUrl);
 
     return (
       <View>
@@ -205,9 +458,9 @@ export function ProfileScreen() {
             style={styles.avatarRing}
           >
             <View style={styles.avatarInner}>
-              {profile.profilePictureUrl ? (
+              {avatar ? (
                 <Image
-                  source={{ uri: profile.profilePictureUrl }}
+                  source={{ uri: avatar }}
                   style={styles.avatarImage}
                   contentFit="cover"
                 />
@@ -218,84 +471,57 @@ export function ProfileScreen() {
           </LinearGradient>
         </View>
 
-        {/* Name + Username */}
-        <Text style={styles.displayName}>{profile.name}</Text>
+        <Text style={styles.displayName}>{profile.displayName}</Text>
         <Text style={styles.username}>@{profile.username}</Text>
 
-        {/* Bio */}
-        {profile.bio ? (
-          <Text style={styles.bio}>{profile.bio}</Text>
-        ) : null}
+        {profile.bio ? <Text style={styles.bio}>{profile.bio}</Text> : null}
 
-        {/* Stats */}
         <View style={styles.statsRow}>
           <View style={styles.stat}>
-            <Text style={styles.statValue}>
-              {formatCount(profile.postCount)}
-            </Text>
+            <Text style={styles.statValue}>{formatCount(profile.postCount)}</Text>
             <Text style={styles.statLabel}>Posts</Text>
           </View>
           <View style={styles.stat}>
-            <Text style={styles.statValue}>
-              {formatCount(profile.followerCount)}
-            </Text>
+            <Text style={styles.statValue}>{formatCount(profile.followersCount)}</Text>
             <Text style={styles.statLabel}>Followers</Text>
           </View>
           <View style={styles.stat}>
-            <Text style={styles.statValue}>
-              {formatCount(profile.followingCount)}
-            </Text>
+            <Text style={styles.statValue}>{formatCount(profile.followingCount)}</Text>
             <Text style={styles.statLabel}>Following</Text>
           </View>
         </View>
 
-        {/* Action buttons */}
         <View style={styles.actionRow}>
           <Pressable
-            style={({ pressed }) => [
-              styles.actionBtn,
-              pressed && { opacity: 0.7 },
-            ]}
+            style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.7 }]}
+            onPress={() => router.push("/edit-profile" as never)}
           >
             <Pencil size={15} color={colors.text} />
             <Text style={styles.actionText}>Edit Profile</Text>
           </Pressable>
           <Pressable
-            style={({ pressed }) => [
-              styles.actionBtn,
-              pressed && { opacity: 0.7 },
-            ]}
+            style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.7 }]}
             onPress={() => router.push("/lists" as never)}
           >
-            <List size={15} color={colors.text} />
+            <ListIcon size={15} color={colors.text} />
             <Text style={styles.actionText}>My Lists</Text>
           </Pressable>
         </View>
 
-        {/* Tabs */}
         <View style={styles.tabRow}>
           <Pressable
             onPress={() => setActiveTab("posts")}
-            style={[
-              styles.tab,
-              activeTab === "posts" && styles.tabActive,
-            ]}
+            style={[styles.tab, activeTab === "posts" && styles.tabActive]}
           >
             <Text
-              style={[
-                styles.tabText,
-                activeTab === "posts" && styles.tabTextActive,
-              ]}
+              style={[styles.tabText, activeTab === "posts" && styles.tabTextActive]}
             >
               Posts
             </Text>
           </Pressable>
           <Pressable
             onPress={() => setActiveTab("watchlist")}
-            style={[
-              styles.tab,
-              activeTab === "watchlist" && styles.tabActive,
-            ]}
+            style={[styles.tab, activeTab === "watchlist" && styles.tabActive]}
           >
             <Text
               style={[
@@ -309,9 +535,39 @@ export function ProfileScreen() {
         </View>
       </View>
     );
-  }, [profile, styles, colors, activeTab, router]);
+  }, [profile, activeTab, styles, colors, router]);
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Render: watchlist sub-filter row ──────────────────────────────────────
+
+  const watchFilters: { key: WatchFilter; label: string }[] = [
+    { key: "all", label: "All" },
+    { key: "watching", label: "Watching" },
+    { key: "watched", label: "Watched" },
+    { key: "watch_next", label: "Watch Next" },
+  ];
+
+  const WatchFilters = (
+    <View style={styles.filterRow}>
+      {watchFilters.map((f) => {
+        const active = watchFilter === f.key;
+        return (
+          <Pressable
+            key={f.key}
+            onPress={() => setWatchFilter(f.key)}
+            style={[styles.filterChip, active && styles.filterChipActive]}
+          >
+            <Text
+              style={[styles.filterChipText, active && styles.filterChipTextActive]}
+            >
+              {f.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+
+  // ── Loading / empty ───────────────────────────────────────────────────────
 
   if (loading) {
     return (
@@ -320,6 +576,8 @@ export function ProfileScreen() {
       </View>
     );
   }
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
@@ -339,14 +597,14 @@ export function ProfileScreen() {
           data={posts}
           keyExtractor={(item) => item.id}
           renderItem={renderPost}
-          ListHeaderComponent={ListHeader}
+          ListHeaderComponent={ProfileHeader}
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
               <Text style={styles.emptyText}>No posts yet</Text>
             </View>
           }
           ListFooterComponent={
-            loadingMore ? (
+            loadingMorePosts ? (
               <ActivityIndicator
                 style={{ paddingVertical: 20 }}
                 color={colors.accent}
@@ -366,24 +624,36 @@ export function ProfileScreen() {
           showsVerticalScrollIndicator={false}
         />
       ) : (
-        <FlatList
-          data={[]}
-          keyExtractor={() => ""}
-          renderItem={() => null}
-          ListHeaderComponent={ListHeader}
-          ListEmptyComponent={
+        <ScrollView
+          contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.accent}
+            />
+          }
+        >
+          <ProfileHeader />
+          {WatchFilters}
+          {watchlistLoading ? (
+            <View style={styles.center}>
+              <ActivityIndicator size="small" color={colors.accent} />
+            </View>
+          ) : visibleWatchItems.length === 0 ? (
             <View style={styles.emptyWrap}>
-              <Text style={styles.emptyText}>
-                Your watchlist is empty
-              </Text>
+              <Text style={styles.emptyText}>Nothing here yet</Text>
               <Text style={[styles.emptyText, { fontSize: 14, marginTop: 4 }]}>
                 Save movies and shows to watch later
               </Text>
             </View>
-          }
-          contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
-          showsVerticalScrollIndicator={false}
-        />
+          ) : (
+            <View style={styles.watchGrid}>
+              {visibleWatchItems.map(renderWatchTile)}
+            </View>
+          )}
+        </ScrollView>
       )}
     </View>
   );
@@ -394,7 +664,7 @@ export function ProfileScreen() {
 function createStyles(c: AppColors) {
   return StyleSheet.create({
     screen: { flex: 1, backgroundColor: c.background },
-    center: { justifyContent: "center", alignItems: "center" },
+    center: { justifyContent: "center", alignItems: "center", padding: 20 },
 
     // Header
     header: {
@@ -427,11 +697,7 @@ function createStyles(c: AppColors) {
       overflow: "hidden",
     },
     avatarImage: { width: 92, height: 92, borderRadius: 46 },
-    avatarInitials: {
-      fontSize: 34,
-      fontWeight: "700",
-      color: c.muted,
-    },
+    avatarInitials: { fontSize: 34, fontWeight: "700", color: c.muted },
 
     // Identity
     displayName: {
@@ -468,7 +734,7 @@ function createStyles(c: AppColors) {
     statValue: { fontSize: 18, fontWeight: "700", color: c.text },
     statLabel: { fontSize: 13, color: c.muted, marginTop: 2 },
 
-    // Action buttons
+    // Actions
     actionRow: {
       flexDirection: "row",
       paddingHorizontal: 20,
@@ -506,7 +772,7 @@ function createStyles(c: AppColors) {
     tabText: { fontSize: 15, fontWeight: "600", color: c.muted },
     tabTextActive: { color: c.accent },
 
-    // Post cards
+    // Posts
     postCard: {
       marginHorizontal: 16,
       marginTop: 14,
@@ -535,18 +801,64 @@ function createStyles(c: AppColors) {
       lineHeight: 20,
       marginBottom: 12,
     },
-    postMeta: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-    },
-    metaGroup: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 4,
-    },
+    postMeta: { flexDirection: "row", alignItems: "center", gap: 6 },
+    metaGroup: { flexDirection: "row", alignItems: "center", gap: 4 },
     metaText: { fontSize: 13, color: c.muted },
     metaDot: { fontSize: 13, color: c.muted },
+
+    // Watchlist filter chips
+    filterRow: {
+      flexDirection: "row",
+      gap: 8,
+      paddingHorizontal: 16,
+      paddingVertical: 14,
+      flexWrap: "wrap",
+    },
+    filterChip: {
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 10,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: "transparent",
+    },
+    filterChipActive: {
+      borderColor: c.accent,
+      backgroundColor: "rgba(0,201,177,0.10)",
+    },
+    filterChipText: { fontSize: 14, fontWeight: "600", color: c.muted },
+    filterChipTextActive: { color: c.accent },
+
+    // Watchlist grid
+    watchGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      paddingHorizontal: 12,
+      gap: 10,
+    },
+    watchTile: { width: "31.5%", gap: 6 },
+    watchArtwork: {
+      width: "100%",
+      aspectRatio: 0.75,
+      borderRadius: 12,
+      overflow: "hidden",
+      backgroundColor: "#222",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    watchIcon: { width: "55%", height: "55%" },
+    favoriteBadge: {
+      position: "absolute",
+      top: 8,
+      right: 8,
+      width: 28,
+      height: 28,
+      borderRadius: 14,
+      backgroundColor: c.accent,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    watchTitle: { fontSize: 13, fontWeight: "700", color: c.text },
+    watchYear: { fontSize: 11, color: c.muted },
 
     // Empty
     emptyWrap: { alignItems: "center", paddingVertical: 40 },

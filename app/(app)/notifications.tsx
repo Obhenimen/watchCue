@@ -1,10 +1,5 @@
-import { PlaceholderScreen } from "@/components/PlaceholderScreen";
+import { NotificationsScreen } from "@/features/notifications/components/NotificationsScreen";
 
 export default function NotificationsRoute() {
-  return (
-    <PlaceholderScreen
-      title="Notifications"
-      description="Port from WatchCueWeb/src/app/components/notifications.tsx."
-    />
-  );
+  return <NotificationsScreen />;
 }

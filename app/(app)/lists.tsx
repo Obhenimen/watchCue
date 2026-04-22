@@ -1,10 +1,5 @@
-import { PlaceholderScreen } from "@/components/PlaceholderScreen";
+import { MyListsScreen } from "@/features/lists/components/MyListsScreen";
 
 export default function ListsRoute() {
-  return (
-    <PlaceholderScreen
-      title="Custom Lists"
-      description="Port from WatchCueWeb/src/app/components/custom-lists.tsx."
-    />
-  );
+  return <MyListsScreen />;
 }

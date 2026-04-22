@@ -1,9 +1,9 @@
-import { useRef, useState } from "react";
-import { Pressable, StyleSheet, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useEvent } from "expo";
 import { Image } from "expo-image";
 import { useVideoPlayer, VideoView } from "expo-video";
-import { Play, Volume2, VolumeX } from "lucide-react-native";
+import { AlertTriangle, Play, Volume2, VolumeX } from "lucide-react-native";
 
 type Props = {
   uri: string;
@@ -60,12 +60,43 @@ function ActiveVideoPlayer({
   const player = useVideoPlayer(uri, (player) => {
     player.loop = true;
     player.muted = true;
-    player.play();
+    // Don't call play() here — the source may not be readyToPlay yet on
+    // remote URLs. We trigger play on the statusChange → readyToPlay event
+    // below. Calling play() on an idle player is a no-op on some platforms.
   });
 
   const { isPlaying } = useEvent(player, "playingChange", {
     isPlaying: player.playing,
   });
+
+  // Surface load errors. `statusChange` fires with { status, error } when
+  // the source transitions between idle | loading | readyToPlay | error.
+  // The hook's initial value is null until the first event fires, so we
+  // fall back to the player's current status property.
+  const statusEvent = useEvent(player, "statusChange");
+  const status = statusEvent?.status ?? player.status;
+  const error = statusEvent?.error;
+
+  // Auto-play once the source is actually ready. Using a ref so we only
+  // attempt the initial play once per mount — manual play uses the overlay.
+  const triedPlayRef = useRef(false);
+  useEffect(() => {
+    if (status === "readyToPlay" && !triedPlayRef.current) {
+      triedPlayRef.current = true;
+      try {
+        player.play();
+      } catch (e) {
+        if (__DEV__) console.warn("[FeedVideoPlayer] play() failed", uri, e);
+      }
+    }
+    if (__DEV__ && status === "error") {
+      console.warn(
+        "[FeedVideoPlayer] failed to load video",
+        uri,
+        error?.message ?? error,
+      );
+    }
+  }, [status, error, player, uri]);
 
   const [isMuted, setIsMuted] = useState(true);
 
@@ -75,6 +106,9 @@ function ActiveVideoPlayer({
     player.volume = next ? 0 : 1;
     setIsMuted(next);
   };
+
+  const isLoading = status === "loading" || status === "idle";
+  const hasError = status === "error";
 
   return (
     <Pressable onPress={onPress} style={[styles.container, style]}>
@@ -91,16 +125,26 @@ function ActiveVideoPlayer({
         contentFit="cover"
         nativeControls={false}
       />
-      {!isPlaying && (
+      {hasError ? (
+        <View style={styles.playOverlay}>
+          <View style={styles.errorBadge}>
+            <AlertTriangle width={16} height={16} color="#fff" />
+            <Text style={styles.errorText}>Video unavailable</Text>
+          </View>
+        </View>
+      ) : !isPlaying ? (
         <Pressable
-          onPress={() => player.play()}
+          onPress={() => {
+            triedPlayRef.current = true;
+            player.play();
+          }}
           style={styles.playOverlay}
         >
           <View style={styles.playBtn}>
             <Play width={22} height={22} color="#fff" fill="#fff" />
           </View>
         </Pressable>
-      )}
+      ) : null}
       {isPlaying && (
         <Pressable
           onPress={(e) => {
@@ -154,4 +198,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  errorBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+  },
+  errorText: { color: "#fff", fontSize: 12, fontWeight: "600" },
 });

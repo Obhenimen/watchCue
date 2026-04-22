@@ -1,10 +1,5 @@
-import { PlaceholderScreen } from "@/components/PlaceholderScreen";
+import { CreatePostScreen } from "@/features/createPost/components/CreatePostScreen";
 
 export default function CreatePostRoute() {
-  return (
-    <PlaceholderScreen
-      title="Create Post"
-      description="Port from WatchCueWeb/src/app/components/create-post.tsx."
-    />
-  );
+  return <CreatePostScreen />;
 }

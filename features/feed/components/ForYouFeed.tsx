@@ -19,7 +19,6 @@ import { useRouter } from "expo-router";
 import {
   Bell,
   ChevronDown,
-  ChevronUp,
   Eye,
   Heart,
   MessageCircle,
@@ -27,14 +26,13 @@ import {
   Plus,
   Repeat2,
   Share2,
-  TrendingUp,
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAppTheme } from "@/features/theme/ThemeContext";
-import { api } from "@/lib/api";
+import { api, mediaUrl } from "@/lib/api";
 import { FeedVideoPlayer } from "./FeedVideoPlayer";
 import type { AppColors } from "@/constants/theme";
-import type { Post } from "../types";
+import type { FeedResponse, Post } from "../types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -47,17 +45,16 @@ function relativeTime(iso: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-const LIMIT = 10;
-
-const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm|avi|mkv)(\?.*)?$/i;
-
-/** Returns the first video URL from mediaUrls, or null. */
-function firstVideoUrl(urls: string[]): string | null {
-  for (const u of urls) {
-    if (VIDEO_EXTENSIONS.test(u)) return u;
-  }
-  return null;
+/** Splits a comma-separated genre string into trimmed, non-empty tags. */
+function splitGenres(genres: string | null | undefined): string[] {
+  if (!genres) return [];
+  return genres
+    .split(",")
+    .map((g) => g.trim())
+    .filter(Boolean);
 }
+
+const LIMIT = 10;
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -74,7 +71,11 @@ export function ForYouFeed() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
-  const offsetRef = useRef(0);
+  const cursorRef = useRef<string | null>(null);
+  // Synchronous guard — onEndReached can fire multiple times in the same
+  // render before `loadingMore` state propagates, which would otherwise
+  // append the same cursor page twice and trigger duplicate-key warnings.
+  const inFlightRef = useRef(false);
 
   // Viewport-based video autoplay
   const [visiblePostId, setVisiblePostId] = useState<string | null>(null);
@@ -90,31 +91,27 @@ export function ForYouFeed() {
 
   // UI state
   const [shareModalPost, setShareModalPost] = useState<Post | null>(null);
-  const [expandedReplies, setExpandedReplies] = useState<Set<string>>(
-    new Set()
-  );
 
   // ── Data fetching ────────────────────────────────────────────────────────────
 
-  const loadFeed = useCallback(async (offset: number, reset: boolean) => {
+  const loadFeed = useCallback(async (cursor: string | null, reset: boolean) => {
     try {
-      const data = await api.get<{ posts?: Post[]; total?: number }>(
-        `/posts/feed?limit=${LIMIT}&offset=${offset}`
-      );
+      const params = new URLSearchParams({ limit: String(LIMIT) });
+      if (cursor) params.set("cursor", cursor);
+      const data = await api.get<FeedResponse>(`/posts/feed?${params.toString()}`);
       const incoming = Array.isArray(data.posts) ? data.posts : [];
-      const total =
-        typeof data.total === "number" && !Number.isNaN(data.total)
-          ? data.total
-          : incoming.length;
 
       if (reset) {
         setPosts(incoming);
       } else {
-        setPosts((prev) => [...prev, ...incoming]);
+        setPosts((prev) => {
+          const seen = new Set(prev.map((p) => p.id));
+          const fresh = incoming.filter((p) => !seen.has(p.id));
+          return fresh.length === 0 ? prev : [...prev, ...fresh];
+        });
       }
-      const newOffset = offset + incoming.length;
-      offsetRef.current = newOffset;
-      setHasMore(newOffset < total);
+      cursorRef.current = data.nextCursor ?? null;
+      setHasMore(!!data.hasNextPage && !!data.nextCursor);
       setLoadError(null);
     } catch (e) {
       const message =
@@ -122,7 +119,7 @@ export function ForYouFeed() {
       setLoadError(message);
       if (reset) {
         setPosts([]);
-        offsetRef.current = 0;
+        cursorRef.current = null;
         setHasMore(false);
       }
     }
@@ -132,8 +129,8 @@ export function ForYouFeed() {
     let cancelled = false;
     (async () => {
       setLoading(true);
-      offsetRef.current = 0;
-      await loadFeed(0, true);
+      cursorRef.current = null;
+      await loadFeed(null, true);
       if (!cancelled) setLoading(false);
     })();
     return () => {
@@ -143,86 +140,114 @@ export function ForYouFeed() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    offsetRef.current = 0;
+    cursorRef.current = null;
     setHasMore(true);
-    await loadFeed(0, true);
+    await loadFeed(null, true);
     setRefreshing(false);
   }, [loadFeed]);
 
   const onEndReached = useCallback(async () => {
-    if (loadingMore || !hasMore) return;
+    if (inFlightRef.current || !hasMore || !cursorRef.current) return;
+    inFlightRef.current = true;
     setLoadingMore(true);
-    await loadFeed(offsetRef.current, false);
-    setLoadingMore(false);
-  }, [loadFeed, loadingMore, hasMore]);
+    try {
+      await loadFeed(cursorRef.current, false);
+    } finally {
+      inFlightRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [loadFeed, hasMore]);
 
   // ── Actions ──────────────────────────────────────────────────────────────────
 
   const handleLike = async (postId: string) => {
     // Optimistic toggle
+    const before = posts.find((p) => p.id === postId);
+    if (!before) return;
     setPosts((prev) =>
       prev.map((p) =>
         p.id !== postId
           ? p
           : {
               ...p,
-              viewerHasLiked: !p.viewerHasLiked,
-              likeCount: !p.viewerHasLiked
-                ? p.likeCount + 1
-                : p.likeCount - 1,
+              likedByMe: !p.likedByMe,
+              likesCount: !p.likedByMe ? p.likesCount + 1 : p.likesCount - 1,
             }
       )
     );
     try {
-      await api.post(`/posts/${postId}/like`, {});
+      const res = await api.post<{ liked: boolean; likesCount: number }>(
+        `/posts/${postId}/like`,
+        {}
+      );
+      // Reconcile with server-authoritative count
+      setPosts((prev) =>
+        prev.map((p) =>
+          p.id !== postId
+            ? p
+            : { ...p, likedByMe: res.liked, likesCount: res.likesCount }
+        )
+      );
     } catch {
       // Revert on failure
       setPosts((prev) =>
         prev.map((p) =>
           p.id !== postId
             ? p
-            : {
-                ...p,
-                viewerHasLiked: !p.viewerHasLiked,
-                likeCount: p.viewerHasLiked
-                  ? p.likeCount + 1
-                  : p.likeCount - 1,
-              }
+            : { ...p, likedByMe: before.likedByMe, likesCount: before.likesCount }
         )
       );
     }
   };
 
-  const handleRepost = (postId: string) => {
+  const handleRepost = async (postId: string) => {
+    const before = posts.find((p) => p.id === postId);
+    if (!before) return;
     setPosts((prev) =>
       prev.map((p) =>
         p.id !== postId
           ? p
           : {
               ...p,
-              viewerHasReposted: !p.viewerHasReposted,
-              repostCount: p.viewerHasReposted
-                ? p.repostCount - 1
-                : p.repostCount + 1,
+              repostedByMe: !p.repostedByMe,
+              repostsCount: p.repostedByMe
+                ? p.repostsCount - 1
+                : p.repostsCount + 1,
             }
       )
     );
-  };
-
-  const toggleReplies = (postId: string) => {
-    setExpandedReplies((prev) => {
-      const next = new Set(prev);
-      if (next.has(postId)) next.delete(postId);
-      else next.add(postId);
-      return next;
-    });
+    try {
+      const res = await api.post<{ reposted: boolean; repostsCount: number }>(
+        `/posts/${postId}/repost`,
+        {}
+      );
+      setPosts((prev) =>
+        prev.map((p) =>
+          p.id !== postId
+            ? p
+            : { ...p, repostedByMe: res.reposted, repostsCount: res.repostsCount }
+        )
+      );
+    } catch {
+      setPosts((prev) =>
+        prev.map((p) =>
+          p.id !== postId
+            ? p
+            : {
+                ...p,
+                repostedByMe: before.repostedByMe,
+                repostsCount: before.repostsCount,
+              }
+        )
+      );
+    }
   };
 
   const sharePost = async (post: Post) => {
     try {
       await Share.share({
-        message: `${post.title}\n\nwatchcuemobile://post/${post.id}`,
-        title: post.title,
+        message: `${post.title ?? post.body.slice(0, 80)}\n\nwatchcuemobile://post/${post.id}`,
+        title: post.title ?? undefined,
       });
     } catch {
       /* ignore */
@@ -237,14 +262,15 @@ export function ForYouFeed() {
    * with the first letter of the username as a fallback.
    */
   const renderAvatar = (
-    profilePictureUrl: string | null | undefined,
+    avatarUrl: string | null | undefined,
     username: string,
     avatarStyle: object
   ) => {
-    if (profilePictureUrl) {
+    const resolved = mediaUrl(avatarUrl);
+    if (resolved) {
       return (
         <Image
-          source={{ uri: profilePictureUrl }}
+          source={{ uri: resolved }}
           style={avatarStyle}
           contentFit="cover"
         />
@@ -263,10 +289,10 @@ export function ForYouFeed() {
   };
 
   const renderPost = ({ item: post }: { item: Post }) => {
-    const areRepliesExpanded = expandedReplies.has(post.id);
+    const genres = splitGenres(post.hub?.genres);
 
     return (
-      <View style={[styles.postCard, post.isHot && styles.postCardHot]}>
+      <View style={styles.postCard}>
         <LinearGradient
           colors={[
             "rgba(255,77,109,0.20)",
@@ -278,34 +304,63 @@ export function ForYouFeed() {
           style={StyleSheet.absoluteFillObject}
         />
 
-        {post.isHot && (
-          <View style={styles.hotRow}>
-            <TrendingUp width={14} height={14} color={colors.accentPink} />
-            <Text style={styles.hotText}>Trending discussion</Text>
-          </View>
-        )}
-
         {/* ── Post header ── */}
         <View style={styles.postHeader}>
           <View style={styles.postHeaderLeft}>
-            {renderAvatar(
-              post.author?.profilePictureUrl,
-              post.author?.username ?? "?",
-              styles.avatar
-            )}
+            <Pressable
+              onPress={() =>
+                post.author?.id && router.push(`/user/${post.author.id}`)
+              }
+              hitSlop={4}
+            >
+              {renderAvatar(
+                post.author?.avatarUrl,
+                post.author?.username ?? post.author?.displayName ?? "?",
+                styles.avatar,
+              )}
+            </Pressable>
             <View style={styles.headerMeta}>
-              <LinearGradient
-                colors={[colors.accentPink, colors.accentPurple, colors.accent]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.hubChip}
-              >
-                <Text style={styles.hubChipText}>{post.hub?.name}</Text>
-              </LinearGradient>
+              <View style={styles.hubRow}>
+                <Pressable
+                  onPress={() =>
+                    post.hub?.id && router.push(`/hub/${post.hub.id}`)
+                  }
+                  hitSlop={4}
+                >
+                  <LinearGradient
+                    colors={[
+                      colors.accentPink,
+                      colors.accentPurple,
+                      colors.accent,
+                    ]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={styles.hubChip}
+                  >
+                    <Text style={styles.hubChipText}>{post.hub?.name}</Text>
+                  </LinearGradient>
+                </Pressable>
+                {genres.length > 0 && (
+                  <View style={styles.genreList}>
+                    {genres.slice(0, 2).map((g) => (
+                      <View key={g} style={styles.genreChip}>
+                        <Text style={styles.genreChipText}>{g}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
               <View style={styles.userRow}>
-                <Text style={styles.username}>
-                  @{post.author?.username}
-                </Text>
+                <Pressable
+                  onPress={() =>
+                    post.author?.id && router.push(`/user/${post.author.id}`)
+                  }
+                  hitSlop={4}
+                >
+                  <Text style={styles.username}>
+                    @{post.author?.username ?? "unknown"}
+                  </Text>
+                </Pressable>
                 <Text style={styles.dot}>·</Text>
                 <Text style={styles.time}>{relativeTime(post.createdAt)}</Text>
               </View>
@@ -318,13 +373,15 @@ export function ForYouFeed() {
 
         {/* ── Body / spoiler ── */}
         <Pressable onPress={() => router.push(`/post/${post.id}`)}>
-          <Text style={styles.postTitle}>{post.title}</Text>
+          {post.title ? (
+            <Text style={styles.postTitle}>{post.title}</Text>
+          ) : null}
           {post.hasSpoiler ? (
             <View style={styles.spoilerWrap}>
               {Platform.OS === "ios" ? (
                 <>
                   <Text style={styles.spoilerText} numberOfLines={5}>
-                    {post.content}
+                    {post.body}
                   </Text>
                   <BlurView
                     style={StyleSheet.absoluteFillObject}
@@ -342,34 +399,37 @@ export function ForYouFeed() {
             </View>
           ) : (
             <Text style={styles.body} numberOfLines={3}>
-              {post.content}
+              {post.body}
             </Text>
           )}
         </Pressable>
 
         {/* ── Media: video → image ── */}
         {(() => {
-          const videoUrl = firstVideoUrl(post.mediaUrls);
-          if (videoUrl) {
-            return (
+          if (post.mediaType === "video" && post.videoUrl) {
+            const videoSrc = mediaUrl(post.videoUrl);
+            const posterSrc = mediaUrl(post.videoThumbnailUrl);
+            return videoSrc ? (
               <FeedVideoPlayer
-                uri={videoUrl}
+                uri={videoSrc}
+                posterUri={posterSrc}
                 isVisible={visiblePostId === post.id}
                 style={styles.postImage}
                 onPress={() => router.push(`/post/${post.id}`)}
               />
-            );
+            ) : null;
           }
-          if (post.mediaUrls.length > 0) {
-            return (
+          if (post.mediaType === "image" && post.imageUrl) {
+            const imgSrc = mediaUrl(post.imageUrl);
+            return imgSrc ? (
               <Pressable onPress={() => router.push(`/post/${post.id}`)}>
                 <Image
-                  source={{ uri: post.mediaUrls[0] }}
+                  source={{ uri: imgSrc }}
                   style={styles.postImage}
                   contentFit="cover"
                 />
               </Pressable>
-            );
+            ) : null;
           }
           return null;
         })()}
@@ -380,17 +440,17 @@ export function ForYouFeed() {
             <Heart
               width={22}
               height={22}
-              color={post.viewerHasLiked ? colors.accentPink : colors.muted}
-              fill={post.viewerHasLiked ? colors.accentPink : "transparent"}
+              color={post.likedByMe ? colors.accentPink : colors.muted}
+              fill={post.likedByMe ? colors.accentPink : "transparent"}
             />
-            <Text style={styles.actionCount}>{post.likeCount}</Text>
+            <Text style={styles.actionCount}>{post.likesCount}</Text>
           </Pressable>
           <Pressable
             onPress={() => router.push(`/post/${post.id}`)}
             style={styles.actionBtn}
           >
             <MessageCircle width={22} height={22} color={colors.muted} />
-            <Text style={styles.actionCount}>{post.commentCount}</Text>
+            <Text style={styles.actionCount}>{post.commentsCount}</Text>
           </Pressable>
           <Pressable
             onPress={() => handleRepost(post.id)}
@@ -399,11 +459,9 @@ export function ForYouFeed() {
             <Repeat2
               width={22}
               height={22}
-              color={
-                post.viewerHasReposted ? colors.accentPurple : colors.muted
-              }
+              color={post.repostedByMe ? colors.accentPurple : colors.muted}
             />
-            <Text style={styles.actionCount}>{post.repostCount}</Text>
+            <Text style={styles.actionCount}>{post.repostsCount}</Text>
           </Pressable>
           <Pressable
             onPress={() => setShareModalPost(post)}
@@ -413,85 +471,66 @@ export function ForYouFeed() {
           </Pressable>
         </View>
 
-        {/* ── Comments preview ── */}
+        {/* ── Top 2 comments preview ── */}
         {post.topComments && post.topComments.length > 0 && (
           <View style={styles.repliesSection}>
-            {!areRepliesExpanded ? (
-              <View style={styles.replyBlock}>
-                {post.topComments.slice(0, 2).map((comment) => (
-                  <View key={comment.id} style={styles.replyRow}>
-                    {renderAvatar(
-                      comment.author?.profilePictureUrl,
-                      comment.author?.username ?? "?",
-                      styles.replyAvatar
-                    )}
-                    <View style={styles.replyBody}>
-                      <View style={styles.userRow}>
-                        <Text style={styles.username}>
-                          @{comment.author?.username}
-                        </Text>
-                        <Text style={styles.dot}>·</Text>
-                        <Text style={styles.time}>
-                          {relativeTime(comment.createdAt)}
-                        </Text>
-                      </View>
-                      <Text style={styles.replyContent} numberOfLines={2}>
-                        {comment.content}
+            {post.topComments.slice(0, 2).map((comment) => (
+              <Pressable
+                key={comment.id}
+                onPress={() => router.push(`/post/${post.id}`)}
+                style={styles.replyRow}
+              >
+                <Pressable
+                  onPress={() =>
+                    comment.author?.id &&
+                    router.push(`/user/${comment.author.id}`)
+                  }
+                  hitSlop={4}
+                >
+                  {renderAvatar(
+                    comment.author?.avatarUrl,
+                    comment.author?.username ?? "?",
+                    styles.replyAvatar,
+                  )}
+                </Pressable>
+                <View style={styles.replyBody}>
+                  <View style={styles.userRow}>
+                    <Pressable
+                      onPress={() =>
+                        comment.author?.id &&
+                        router.push(`/user/${comment.author.id}`)
+                      }
+                      hitSlop={4}
+                    >
+                      <Text style={styles.username}>
+                        @{comment.author?.username ?? "unknown"}
                       </Text>
-                    </View>
+                    </Pressable>
+                    <Text style={styles.dot}>·</Text>
+                    <Text style={styles.time}>
+                      {relativeTime(
+                        typeof comment.createdAt === "string"
+                          ? comment.createdAt
+                          : new Date(comment.createdAt).toISOString(),
+                      )}
+                    </Text>
                   </View>
-                ))}
-                <Pressable
-                  onPress={() => toggleReplies(post.id)}
-                  style={styles.viewAllReplies}
-                >
-                  <ChevronDown width={16} height={16} color={colors.accent} />
-                  <Text style={styles.linkText}>
-                    View all {post.commentCount} replies
+                  <Text style={styles.replyContent} numberOfLines={2}>
+                    {comment.body}
                   </Text>
-                </Pressable>
-              </View>
-            ) : (
-              <View style={styles.replyBlock}>
-                {post.topComments.map((comment) => (
-                  <View key={comment.id} style={styles.replyRow}>
-                    {renderAvatar(
-                      comment.author?.profilePictureUrl,
-                      comment.author?.username ?? "?",
-                      styles.replyAvatar
-                    )}
-                    <View style={styles.replyBody}>
-                      <View style={styles.userRow}>
-                        <Text style={styles.username}>
-                          @{comment.author?.username}
-                        </Text>
-                        <Text style={styles.dot}>·</Text>
-                        <Text style={styles.time}>
-                          {relativeTime(comment.createdAt)}
-                        </Text>
-                      </View>
-                      <Text style={styles.replyContent}>
-                        {comment.content}
-                      </Text>
-                    </View>
-                  </View>
-                ))}
-                <Pressable
-                  onPress={() => router.push(`/post/${post.id}`)}
-                  style={styles.continueThread}
-                >
-                  <Text style={styles.linkText}>
-                    Continue this conversation →
-                  </Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => toggleReplies(post.id)}
-                  style={styles.viewAllReplies}
-                >
-                  <ChevronUp width={16} height={16} color={colors.accent} />
-                  <Text style={styles.linkText}>Collapse replies</Text>
-                </Pressable>
-              </View>
+                </View>
+              </Pressable>
+            ))}
+            {post.commentsCount > post.topComments.length && (
+              <Pressable
+                onPress={() => router.push(`/post/${post.id}`)}
+                style={styles.viewAllReplies}
+              >
+                <ChevronDown width={16} height={16} color={colors.accent} />
+                <Text style={styles.linkText}>
+                  View all {post.commentsCount} replies
+                </Text>
+              </Pressable>
             )}
           </View>
         )}
@@ -626,7 +665,7 @@ export function ForYouFeed() {
               <Text style={styles.modalTitle}>Share post</Text>
               {shareModalPost && (
                 <Text style={styles.modalPreview} numberOfLines={2}>
-                  {shareModalPost.title}
+                  {shareModalPost.title ?? shareModalPost.body}
                 </Text>
               )}
               <Pressable
@@ -700,16 +739,6 @@ function createStyles(c: AppColors) {
       width: "98%",
       alignSelf: "center",
     },
-    postCardHot: {},
-    hotRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-      paddingHorizontal: 16,
-      paddingTop: 12,
-      paddingBottom: 4,
-    },
-    hotText: { fontSize: 12, fontWeight: "600", color: c.accentPink },
     postHeader: {
       flexDirection: "row",
       justifyContent: "space-between",
@@ -725,14 +754,33 @@ function createStyles(c: AppColors) {
     avatarCenter: { alignItems: "center", justifyContent: "center" },
     avatarInitial: { fontSize: 16, fontWeight: "700", color: "#fff" },
     headerMeta: { flex: 1 },
+    hubRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 6,
+      marginBottom: 4,
+    },
     hubChip: {
-      alignSelf: "flex-start",
       paddingHorizontal: 8,
       paddingVertical: 4,
       borderRadius: 999,
-      marginBottom: 4,
     },
     hubChipText: { fontSize: 11, fontWeight: "600", color: "#fff" },
+    genreList: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 4,
+    },
+    genreChip: {
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 999,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.border,
+      backgroundColor: "transparent",
+    },
+    genreChipText: { fontSize: 10, fontWeight: "600", color: c.muted },
     userRow: { flexDirection: "row", alignItems: "center", gap: 4 },
     username: { fontSize: 12, fontWeight: "600", color: c.text },
     dot: { fontSize: 12, color: c.muted },
@@ -807,8 +855,8 @@ function createStyles(c: AppColors) {
       borderTopColor: c.border,
       paddingVertical: 12,
       paddingHorizontal: 16,
+      gap: 12,
     },
-    replyBlock: { gap: 12 },
     replyRow: {
       flexDirection: "row",
       gap: 10,
@@ -829,7 +877,6 @@ function createStyles(c: AppColors) {
       gap: 6,
       paddingLeft: 12,
     },
-    continueThread: { paddingLeft: 12, paddingVertical: 8 },
     linkText: { color: c.accent, fontSize: 14, fontWeight: "500" },
 
     // Empty / loading states

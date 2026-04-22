@@ -60,8 +60,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const attachToken = !!token && !isPublicAuthPath(path);
   const url = joinUrl(BASE_URL, API_PREFIX, path);
 
+  // For multipart bodies (FormData) we MUST omit Content-Type so fetch sets
+  // the correct boundary on the multipart/form-data header itself.
+  const isFormData =
+    typeof FormData !== "undefined" && body instanceof FormData;
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    ...(isFormData ? {} : { "Content-Type": "application/json" }),
     ...(extraHeaders as Record<string, string>),
     ...(attachToken ? { Authorization: `Bearer ${token}` } : {}),
   };
@@ -83,7 +87,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     response = await fetch(url, {
       ...rest,
       headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body:
+        body === undefined
+          ? undefined
+          : isFormData
+            ? (body as BodyInit)
+            : JSON.stringify(body),
     });
   } catch (e) {
     const hint =
@@ -144,6 +153,20 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   return data as T;
+}
+
+/**
+ * Resolve a media URL returned by the API to something a native player /
+ * image loader can fetch. Server-relative paths like "/uploads/posts/x.mp4"
+ * are joined to EXPO_PUBLIC_API_URL (NOT the API prefix — static assets are
+ * mounted on the bare host). Absolute URLs (http/https/data) are returned
+ * unchanged so external media (TMDB posters, etc.) keeps working.
+ */
+export function mediaUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  if (/^(https?:|data:|file:)/i.test(url)) return url;
+  if (!BASE_URL) return url;
+  return url.startsWith("/") ? `${BASE_URL}${url}` : `${BASE_URL}/${url}`;
 }
 
 export const api = {
