@@ -169,6 +169,27 @@ export function mediaUrl(url: string | null | undefined): string | null {
   return url.startsWith("/") ? `${BASE_URL}${url}` : `${BASE_URL}/${url}`;
 }
 
+/**
+ * True if the URL points to a file hosted on our own backend.
+ * Accepts:
+ *   - Relative paths ("/uploads/posts/x.mp4") — joined to BASE_URL by mediaUrl().
+ *   - Absolute URLs whose origin matches EXPO_PUBLIC_API_URL.
+ *   - Absolute URLs whose path starts with "/uploads/" — covers the common dev
+ *     case where the API stores `http://localhost:3000/uploads/...` but the
+ *     phone hits the API via a LAN IP, so origins don't match exactly.
+ * Used to gate video playback: we only stream videos we host ourselves;
+ * external "video" URLs (TMDB clips, YouTube, etc.) fall back to a poster.
+ */
+export function isOwnServerUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  if (/^(data:|file:)/i.test(url)) return false;
+  if (!/^https?:/i.test(url)) return true;
+  if (BASE_URL && url.toLowerCase().startsWith(BASE_URL.toLowerCase())) return true;
+  const pathMatch = url.match(/^https?:\/\/[^/]+(\/.*)$/i);
+  const path = pathMatch?.[1] ?? "";
+  return path.toLowerCase().startsWith("/uploads/");
+}
+
 export const api = {
   post: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "POST", body }),

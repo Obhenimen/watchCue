@@ -7,14 +7,10 @@
     "icon": "./assets/images/icon.png",
     "scheme": "watchcuemobile",
     "userInterfaceStyle": "automatic",
-    "splash": {
-      "image": "./assets/images/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#0D0D0F"
-    },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.WatchCueMobile"
+      "bundleIdentifier": "com.anonymous.WatchCueMobile",
+      "icon": "./assets/images/icon.png"
     },
     "android": {
       "adaptiveIcon": {
@@ -37,6 +33,14 @@
     "plugins": [
       "expo-router",
       "expo-image",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#0D0D0F"
+        }
+      ],
       [
         "expo-image-picker",
         {

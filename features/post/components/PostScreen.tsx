@@ -27,7 +27,7 @@ import {
   Share2,
 } from "lucide-react-native";
 import { useAppTheme } from "@/features/theme/ThemeContext";
-import { api, mediaUrl } from "@/lib/api";
+import { api, mediaUrl, isOwnServerUrl } from "@/lib/api";
 import { FeedVideoPlayer } from "@/features/feed/components/FeedVideoPlayer";
 import type { AppColors } from "@/constants/theme";
 import type {
@@ -482,9 +482,18 @@ export function PostScreen({ postId }: { postId: string }) {
     );
   }
 
-  const videoSrc = post.mediaType === "video" ? mediaUrl(post.videoUrl) : null;
+  // Only stream videos we host ourselves; external "video" URLs render as a still poster.
+  const videoSrc =
+    post.mediaType === "video" && isOwnServerUrl(post.videoUrl)
+      ? mediaUrl(post.videoUrl)
+      : null;
   const posterSrc = mediaUrl(post.videoThumbnailUrl);
-  const imgSrc = post.mediaType === "image" ? mediaUrl(post.imageUrl) : null;
+  const imgSrc =
+    post.mediaType === "image"
+      ? mediaUrl(post.imageUrl)
+      : post.mediaType === "video" && !videoSrc
+        ? posterSrc
+        : null;
 
   return (
     <KeyboardAvoidingView

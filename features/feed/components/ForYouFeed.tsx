@@ -29,7 +29,7 @@ import {
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAppTheme } from "@/features/theme/ThemeContext";
-import { api, mediaUrl } from "@/lib/api";
+import { api, mediaUrl, isOwnServerUrl } from "@/lib/api";
 import { FeedVideoPlayer } from "./FeedVideoPlayer";
 import type { AppColors } from "@/constants/theme";
 import type { FeedResponse, Post } from "../types";
@@ -404,19 +404,39 @@ export function ForYouFeed() {
           )}
         </Pressable>
 
-        {/* ── Media: video → image ── */}
+        {/* ── Media: video (only if hosted on our server) → image ── */}
         {(() => {
           if (post.mediaType === "video" && post.videoUrl) {
-            const videoSrc = mediaUrl(post.videoUrl);
             const posterSrc = mediaUrl(post.videoThumbnailUrl);
-            return videoSrc ? (
-              <FeedVideoPlayer
-                uri={videoSrc}
-                posterUri={posterSrc}
-                isVisible={visiblePostId === post.id}
-                style={styles.postImage}
-                onPress={() => router.push(`/post/${post.id}`)}
-              />
+            const onOwnServer = isOwnServerUrl(post.videoUrl);
+            if (__DEV__) {
+              console.log(
+                `[ForYouFeed] post ${post.id} video=${post.videoUrl} ownServer=${onOwnServer}`,
+              );
+            }
+            // Only stream videos we host ourselves; otherwise fall back to poster.
+            if (onOwnServer) {
+              const videoSrc = mediaUrl(post.videoUrl);
+              if (videoSrc) {
+                return (
+                  <FeedVideoPlayer
+                    uri={videoSrc}
+                    posterUri={posterSrc}
+                    isVisible={visiblePostId === post.id}
+                    style={styles.postImage}
+                    onPress={() => router.push(`/post/${post.id}`)}
+                  />
+                );
+              }
+            }
+            return posterSrc ? (
+              <Pressable onPress={() => router.push(`/post/${post.id}`)}>
+                <Image
+                  source={{ uri: posterSrc }}
+                  style={styles.postImage}
+                  contentFit="cover"
+                />
+              </Pressable>
             ) : null;
           }
           if (post.mediaType === "image" && post.imageUrl) {

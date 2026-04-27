@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import { useEvent } from "expo";
 import { Image } from "expo-image";
 import { useVideoPlayer, VideoView } from "expo-video";
-import { AlertTriangle, Play, Volume2, VolumeX } from "lucide-react-native";
+import { Play, Volume2, VolumeX } from "lucide-react-native";
 
 type Props = {
   uri: string;
@@ -110,6 +110,24 @@ function ActiveVideoPlayer({
   const isLoading = status === "loading" || status === "idle";
   const hasError = status === "error";
 
+  // Video failed to load (404, codec, network, etc.) — fall back to the
+  // poster image so the post still shows something rather than a black box.
+  if (hasError) {
+    return (
+      <Pressable onPress={onPress} style={[styles.container, style]}>
+        {posterUri ? (
+          <Image
+            source={{ uri: posterUri }}
+            style={StyleSheet.absoluteFill}
+            contentFit="cover"
+          />
+        ) : (
+          <View style={StyleSheet.absoluteFill} />
+        )}
+      </Pressable>
+    );
+  }
+
   return (
     <Pressable onPress={onPress} style={[styles.container, style]}>
       {posterUri && (
@@ -125,14 +143,7 @@ function ActiveVideoPlayer({
         contentFit="cover"
         nativeControls={false}
       />
-      {hasError ? (
-        <View style={styles.playOverlay}>
-          <View style={styles.errorBadge}>
-            <AlertTriangle width={16} height={16} color="#fff" />
-            <Text style={styles.errorText}>Video unavailable</Text>
-          </View>
-        </View>
-      ) : !isPlaying ? (
+      {!isPlaying ? (
         <Pressable
           onPress={() => {
             triedPlayRef.current = true;
@@ -198,14 +209,4 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  errorBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: "rgba(0,0,0,0.7)",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-  },
-  errorText: { color: "#fff", fontSize: 12, fontWeight: "600" },
 });
