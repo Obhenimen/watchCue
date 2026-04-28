@@ -277,7 +277,17 @@ function CommentItem({
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
-export function PostScreen({ postId }: { postId: string }) {
+export function PostScreen({
+  postId,
+  startTimeSec,
+  startMuted,
+}: {
+  postId: string;
+  /** Resume the inline video at this position (handoff from the feed). */
+  startTimeSec?: number;
+  /** Initial mute state, carried over from the feed. */
+  startMuted?: boolean;
+}) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
@@ -579,6 +589,9 @@ export function PostScreen({ postId }: { postId: string }) {
               posterUri={posterSrc}
               isVisible
               style={styles.media}
+              startTimeSec={startTimeSec}
+              startMuted={startMuted}
+              showControls
             />
           ) : imgSrc ? (
             <Image source={{ uri: imgSrc }} style={styles.media} contentFit="cover" />
@@ -746,14 +759,22 @@ function createStyles(c: AppColors) {
 
     scrollContent: { padding: 12, gap: 12 },
 
-    // Post card
+    // Post card. Horizontal padding lives on the inner text/action rows so
+    // the media (image/video) can span the full card width edge-to-edge,
+    // matching the For You feed.
     postCard: {
       backgroundColor: c.surface,
       borderRadius: 14,
-      padding: 16,
+      paddingVertical: 16,
       gap: 12,
+      overflow: "hidden",
     },
-    postHeader: { flexDirection: "row", alignItems: "center", gap: 12 },
+    postHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+      paddingHorizontal: 16,
+    },
     postHeaderMeta: { flex: 1, gap: 4 },
     hubChip: {
       alignSelf: "flex-start",
@@ -767,12 +788,22 @@ function createStyles(c: AppColors) {
     dot: { fontSize: 12, color: c.muted },
     time: { fontSize: 12, color: c.muted },
 
-    title: { fontSize: 18, fontWeight: "700", color: c.text, lineHeight: 24 },
-    body: { fontSize: 15, color: c.text, lineHeight: 22 },
+    title: {
+      fontSize: 18,
+      fontWeight: "700",
+      color: c.text,
+      lineHeight: 24,
+      paddingHorizontal: 16,
+    },
+    body: {
+      fontSize: 15,
+      color: c.text,
+      lineHeight: 22,
+      paddingHorizontal: 16,
+    },
     media: {
       width: "100%",
       height: 220,
-      borderRadius: 10,
       backgroundColor: "#000",
     },
 
@@ -780,6 +811,7 @@ function createStyles(c: AppColors) {
       fontSize: 13,
       color: c.muted,
       paddingTop: 4,
+      paddingHorizontal: 16,
       borderTopWidth: StyleSheet.hairlineWidth,
       borderTopColor: c.border,
       marginTop: 4,
@@ -791,6 +823,7 @@ function createStyles(c: AppColors) {
       justifyContent: "space-between",
       alignItems: "center",
       paddingTop: 8,
+      paddingHorizontal: 16,
       borderTopWidth: StyleSheet.hairlineWidth,
       borderTopColor: c.border,
     },

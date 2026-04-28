@@ -17,13 +17,13 @@ interface RequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
 }
 
-function joinUrl(base: string, prefix: string, path: string): string {
+export function joinUrl(base: string, prefix: string, path: string): string {
   const p = path.startsWith("/") ? path : `/${path}`;
   if (!prefix) return `${base}${p}`;
   return `${base}/${prefix}${p}`;
 }
 
-function extractErrorMessage(data: unknown): string {
+export function extractErrorMessage(data: unknown): string {
   if (!data || typeof data !== "object") return "";
   const d = data as Record<string, unknown>;
   const raw = d.message;
@@ -33,7 +33,7 @@ function extractErrorMessage(data: unknown): string {
 }
 
 /** Routes that must not send a stored access token (avoid confusing proxies / future middleware). */
-function isPublicAuthPath(path: string): boolean {
+export function isPublicAuthPath(path: string): boolean {
   const base = path.split("?")[0];
   return (
     base.endsWith("/auth/login") ||

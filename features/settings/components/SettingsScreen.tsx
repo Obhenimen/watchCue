@@ -251,6 +251,10 @@ export function SettingsScreen() {
   const ic = colors.text;
   const sz = 20;
 
+  /** Stub for rows that don't yet have a destination screen. */
+  const showComingSoon = (label: string) =>
+    Alert.alert(label, "Coming soon.", [{ text: "OK" }]);
+
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       {/* ── Header ── */}
@@ -265,11 +269,27 @@ export function SettingsScreen() {
         {/* ── ACCOUNT ── */}
         <SectionHeader title="ACCOUNT" colors={colors} />
         <View style={styles.card}>
-          <NavRow icon={<User size={sz} color={ic} />} label="Edit Profile" colors={colors} />
+          <NavRow
+            icon={<User size={sz} color={ic} />}
+            label="Edit Profile"
+            colors={colors}
+            onPress={() => router.push("/edit-profile")}
+          />
           <Divider colors={colors} />
-          <NavRow icon={<Lock size={sz} color={ic} />} label="Change Password" colors={colors} />
+          <NavRow
+            icon={<Lock size={sz} color={ic} />}
+            label="Change Password"
+            colors={colors}
+            onPress={() => router.push("/forgot-password")}
+          />
           <Divider colors={colors} />
-          <NavRow icon={<Globe size={sz} color={ic} />} label="Language" value="English" colors={colors} />
+          <NavRow
+            icon={<Globe size={sz} color={ic} />}
+            label="Language"
+            value="English"
+            colors={colors}
+            onPress={() => showComingSoon("Language")}
+          />
         </View>
 
         {/* ── NOTIFICATIONS ── */}
@@ -388,9 +408,21 @@ export function SettingsScreen() {
         {/* ── MORE ── */}
         <SectionHeader title="MORE" colors={colors} />
         <View style={styles.card}>
-          <NavRow icon={<HelpCircle size={sz} color={ic} />} label="Help & Support" colors={colors} />
+          <NavRow
+            icon={<HelpCircle size={sz} color={ic} />}
+            label="Help & Support"
+            colors={colors}
+            onPress={() => showComingSoon("Help & Support")}
+          />
           <Divider colors={colors} />
-          <NavRow icon={<Info size={sz} color={ic} />} label="About" colors={colors} />
+          <NavRow
+            icon={<Info size={sz} color={ic} />}
+            label="About"
+            colors={colors}
+            onPress={() =>
+              Alert.alert("About WatchCue", "Version 1.0.0", [{ text: "OK" }])
+            }
+          />
         </View>
 
         {/* ── Actions ── */}

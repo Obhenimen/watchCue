@@ -15,7 +15,7 @@ import {
 import { Image } from "expo-image";
 import { BlurView } from "expo-blur";
 import { LinearGradient } from "expo-linear-gradient";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import {
   Bell,
   ChevronDown,
@@ -45,15 +45,6 @@ function relativeTime(iso: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-/** Splits a comma-separated genre string into trimmed, non-empty tags. */
-function splitGenres(genres: string | null | undefined): string[] {
-  if (!genres) return [];
-  return genres
-    .split(",")
-    .map((g) => g.trim())
-    .filter(Boolean);
-}
-
 const LIMIT = 10;
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -76,18 +67,37 @@ export function ForYouFeed() {
   // render before `loadingMore` state propagates, which would otherwise
   // append the same cursor page twice and trigger duplicate-key warnings.
   const inFlightRef = useRef(false);
+  // Tracks hubs already shown so a single movie/series cannot appear in
+  // the feed more than once across paginated pages.
+  const seenHubIdsRef = useRef<Set<string>>(new Set());
 
-  // Viewport-based video autoplay
+  // Viewport-based video autoplay. We mirror visiblePostId into a ref so we
+  // can restore it on focus — viewability events don't re-fire when the user
+  // returns from the post detail screen and the same items are still on
+  // screen, so without this ref the feed video would never resume.
   const [visiblePostId, setVisiblePostId] = useState<string | null>(null);
+  const lastVisiblePostIdRef = useRef<string | null>(null);
   const onViewableItemsChanged = useRef(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
       const first = viewableItems.find((v) => v.isViewable);
-      setVisiblePostId(first?.item?.id ?? null);
+      const id = first?.item?.id ?? null;
+      lastVisiblePostIdRef.current = id;
+      setVisiblePostId(id);
     }
   ).current;
   const viewabilityConfig = useRef({
     itemVisiblePercentThreshold: 60,
   }).current;
+
+  // Pause the active feed video when navigating away (clearing visiblePostId
+  // unmounts ActiveVideoPlayer so its audio doesn't fight the post-screen
+  // player). Resume on focus by restoring the last-known visible post.
+  useFocusEffect(
+    useCallback(() => {
+      setVisiblePostId(lastVisiblePostIdRef.current);
+      return () => setVisiblePostId(null);
+    }, []),
+  );
 
   // UI state
   const [shareModalPost, setShareModalPost] = useState<Post | null>(null);
@@ -102,11 +112,24 @@ export function ForYouFeed() {
       const incoming = Array.isArray(data.posts) ? data.posts : [];
 
       if (reset) {
-        setPosts(incoming);
+        seenHubIdsRef.current = new Set();
+      }
+      const seenHubs = seenHubIdsRef.current;
+      const dedupedByHub: Post[] = [];
+      for (const p of incoming) {
+        if (p.hubId) {
+          if (seenHubs.has(p.hubId)) continue;
+          seenHubs.add(p.hubId);
+        }
+        dedupedByHub.push(p);
+      }
+
+      if (reset) {
+        setPosts(dedupedByHub);
       } else {
         setPosts((prev) => {
-          const seen = new Set(prev.map((p) => p.id));
-          const fresh = incoming.filter((p) => !seen.has(p.id));
+          const seenIds = new Set(prev.map((p) => p.id));
+          const fresh = dedupedByHub.filter((p) => !seenIds.has(p.id));
           return fresh.length === 0 ? prev : [...prev, ...fresh];
         });
       }
@@ -120,6 +143,7 @@ export function ForYouFeed() {
       if (reset) {
         setPosts([]);
         cursorRef.current = null;
+        seenHubIdsRef.current = new Set();
         setHasMore(false);
       }
     }
@@ -289,8 +313,6 @@ export function ForYouFeed() {
   };
 
   const renderPost = ({ item: post }: { item: Post }) => {
-    const genres = splitGenres(post.hub?.genres);
-
     return (
       <View style={styles.postCard}>
         <LinearGradient
@@ -340,15 +362,6 @@ export function ForYouFeed() {
                     <Text style={styles.hubChipText}>{post.hub?.name}</Text>
                   </LinearGradient>
                 </Pressable>
-                {genres.length > 0 && (
-                  <View style={styles.genreList}>
-                    {genres.slice(0, 2).map((g) => (
-                      <View key={g} style={styles.genreChip}>
-                        <Text style={styles.genreChipText}>{g}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
               </View>
               <View style={styles.userRow}>
                 <Pressable
@@ -424,7 +437,21 @@ export function ForYouFeed() {
                     posterUri={posterSrc}
                     isVisible={visiblePostId === post.id}
                     style={styles.postImage}
-                    onPress={() => router.push(`/post/${post.id}`)}
+                    onPress={(handoff) => {
+                      // If the video was actively playing, hand its position
+                      // and mute state off so PostScreen resumes seamlessly.
+                      if (handoff && handoff.currentTimeSec > 0) {
+                        const params = new URLSearchParams({
+                          t: handoff.currentTimeSec.toFixed(2),
+                          muted: handoff.muted ? "1" : "0",
+                        });
+                        router.push(
+                          `/post/${post.id}?${params.toString()}` as never,
+                        );
+                      } else {
+                        router.push(`/post/${post.id}`);
+                      }
+                    }}
                   />
                 );
               }
@@ -787,20 +814,6 @@ function createStyles(c: AppColors) {
       borderRadius: 999,
     },
     hubChipText: { fontSize: 11, fontWeight: "600", color: "#fff" },
-    genreList: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 4,
-    },
-    genreChip: {
-      paddingHorizontal: 8,
-      paddingVertical: 3,
-      borderRadius: 999,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: c.border,
-      backgroundColor: "transparent",
-    },
-    genreChipText: { fontSize: 10, fontWeight: "600", color: c.muted },
     userRow: { flexDirection: "row", alignItems: "center", gap: 4 },
     username: { fontSize: 12, fontWeight: "600", color: c.text },
     dot: { fontSize: 12, color: c.muted },
@@ -815,7 +828,7 @@ function createStyles(c: AppColors) {
     },
     body: {
       fontSize: 14,
-      color: c.muted,
+      color: c.text,
       lineHeight: 20,
       paddingHorizontal: 16,
       marginBottom: 8,

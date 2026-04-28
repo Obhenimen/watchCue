@@ -138,6 +138,9 @@ export function ProfileScreen() {
   const [favoriteHubIds, setFavoriteHubIds] = useState<Set<string>>(new Set());
   const [watchlistLoading, setWatchlistLoading] = useState(false);
   const [watchFilter, setWatchFilter] = useState<WatchFilter>("all");
+  // Fallback for Watch Next when the user has no items with that status —
+  // populated from the top 20 posts on the For You feed (deduped by hub).
+  const [watchNextFallback, setWatchNextFallback] = useState<ListItem[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -251,6 +254,74 @@ export function ProfileScreen() {
     }
   }, [fetchAllListItems]);
 
+  /**
+   * Pulls the top 20 posts from the For You feed and projects each unique hub
+   * into a ListItem-shaped suggestion. Used as the Watch Next fallback so a
+   * brand-new user with an empty watchlist still sees something to explore.
+   *
+   * The feed's HubSummary only carries iconUrl (a poster), so we re-hydrate
+   * each hub via /hubs/:id in parallel to get the proper landscape backdrop
+   * — otherwise tiles fall back to the gradient and don't match the Watched
+   * tab's full-bleed look.
+   */
+  const fetchWatchNextFallback = useCallback(async () => {
+    try {
+      const data = await api.get<{
+        posts: {
+          id: string;
+          createdAt: string;
+          hub: { id: string; name: string } | null;
+        }[];
+      }>("/posts/feed?limit=20");
+
+      // Preserve feed order, dedupe by hub.
+      const orderedHubIds: string[] = [];
+      const addedAtById = new Map<string, string>();
+      const seen = new Set<string>();
+      for (const p of data.posts ?? []) {
+        const h = p.hub;
+        if (!h?.id || seen.has(h.id)) continue;
+        seen.add(h.id);
+        orderedHubIds.push(h.id);
+        addedAtById.set(h.id, p.createdAt);
+      }
+
+      const results = await Promise.allSettled(
+        orderedHubIds.map((id) =>
+          api.get<{
+            id: string;
+            name: string;
+            year: number | null;
+            iconUrl: string | null;
+            backdropUrl: string | null;
+          }>(`/hubs/${id}`),
+        ),
+      );
+
+      const items: ListItem[] = [];
+      results.forEach((r, idx) => {
+        if (r.status !== "fulfilled") return;
+        const hub = r.value;
+        items.push({
+          listId: "",
+          hubId: hub.id,
+          status: "watch_next",
+          addedAt: addedAtById.get(orderedHubIds[idx]) ?? new Date().toISOString(),
+          hub: {
+            id: hub.id,
+            name: hub.name,
+            year: hub.year,
+            iconUrl: hub.iconUrl,
+            backdropUrl: hub.backdropUrl,
+          },
+        });
+      });
+      setWatchNextFallback(items);
+    } catch {
+      setWatchNextFallback([]);
+    }
+  }, []);
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -275,8 +346,9 @@ export function ProfileScreen() {
     if (activeTab === "watchlist" && !watchlistFetchedRef.current) {
       watchlistFetchedRef.current = true;
       fetchWatchlist();
+      fetchWatchNextFallback();
     }
-  }, [activeTab, fetchWatchlist]);
+  }, [activeTab, fetchWatchlist, fetchWatchNextFallback]);
 
   const onRefresh = useCallback(async () => {
     if (!profile) return;
@@ -287,10 +359,10 @@ export function ProfileScreen() {
       await fetchPosts(me.id, null, true);
     }
     if (activeTab === "watchlist") {
-      await fetchWatchlist();
+      await Promise.all([fetchWatchlist(), fetchWatchNextFallback()]);
     }
     setRefreshing(false);
-  }, [profile, fetchProfile, fetchPosts, activeTab, fetchWatchlist]);
+  }, [profile, fetchProfile, fetchPosts, activeTab, fetchWatchlist, fetchWatchNextFallback]);
 
   const onEndReached = useCallback(async () => {
     if (
@@ -318,8 +390,12 @@ export function ProfileScreen() {
         return watchedItems;
       case "watching":
         return watchlistItems.filter((i) => i.status === "watching");
-      case "watch_next":
-        return watchlistItems.filter((i) => i.status === "watch_next");
+      case "watch_next": {
+        // Watch Next must never be empty — fall back to top hubs from the
+        // For You feed when the user hasn't queued anything themselves.
+        const own = watchlistItems.filter((i) => i.status === "watch_next");
+        return own.length > 0 ? own : watchNextFallback;
+      }
       case "all":
       default: {
         // Union watchlist + watched, deduped by hubId.
@@ -333,7 +409,7 @@ export function ProfileScreen() {
         return out;
       }
     }
-  }, [watchFilter, watchlistItems, watchedItems]);
+  }, [watchFilter, watchlistItems, watchedItems, watchNextFallback]);
 
   // ── Render: post card ─────────────────────────────────────────────────────
 

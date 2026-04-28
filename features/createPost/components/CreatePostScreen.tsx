@@ -108,6 +108,7 @@ function HubPickerModal({
   colors: AppColors;
 }) {
   const styles = useMemo(() => createPickerStyles(colors), [colors]);
+  const insets = useSafeAreaInsets();
   const [query, setQuery] = useState("");
   const [followed, setFollowed] = useState<Hub[]>([]);
   const [results, setResults] = useState<Hub[] | null>(null);
@@ -167,7 +168,14 @@ function HubPickerModal({
       transparent={false}
       onRequestClose={onClose}
     >
-      <View style={styles.modalScreen}>
+      <View
+        style={[
+          styles.modalScreen,
+          // Push content below the status bar / notch so the close button
+          // isn't sitting under system UI and ignoring taps.
+          { paddingTop: insets.top + 8, paddingBottom: insets.bottom + 16 },
+        ]}
+      >
         <View style={styles.modalHeader}>
           <Text style={styles.modalTitle}>Choose a hub</Text>
           <Pressable onPress={onClose} hitSlop={10}>
@@ -867,7 +875,15 @@ function createStyles(c: AppColors) {
 
 function createPickerStyles(c: AppColors) {
   return StyleSheet.create({
-    modalScreen: { flex: 1, backgroundColor: c.background, padding: 16, gap: 12 },
+    // paddingTop and paddingBottom are overridden inline using safe-area
+    // insets so the close button clears the notch and the list clears the
+    // home indicator.
+    modalScreen: {
+      flex: 1,
+      backgroundColor: c.background,
+      paddingHorizontal: 16,
+      gap: 12,
+    },
     modalHeader: {
       flexDirection: "row",
       alignItems: "center",

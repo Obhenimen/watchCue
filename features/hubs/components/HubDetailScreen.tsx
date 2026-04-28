@@ -153,6 +153,9 @@ export function HubDetailScreen({ hubId }: { hubId: string }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // True while a sort-tab change is fetching its first page — keeps the empty
+  // branch from flashing "No posts in this hub yet." between tabs.
+  const [postsLoading, setPostsLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const cursorRef = useRef<string | null>(null);
   const inFlightRef = useRef(false);
@@ -228,7 +231,13 @@ export function HubDetailScreen({ hubId }: { hubId: string }) {
       cursorRef.current = null;
       setHasMore(true);
       setPosts([]);
-      await loadPosts(next, null, true);
+      setPostsError(null);
+      setPostsLoading(true);
+      try {
+        await loadPosts(next, null, true);
+      } finally {
+        setPostsLoading(false);
+      }
     },
     [sort, loadPosts],
   );
@@ -533,7 +542,13 @@ export function HubDetailScreen({ hubId }: { hubId: string }) {
         onEndReached={onEndReached}
         onEndReachedThreshold={0.4}
         ListFooterComponent={
-          loadingMore ? (
+          postsLoading ? (
+            <ActivityIndicator
+              size="large"
+              color={colors.accentPink}
+              style={{ marginVertical: 32 }}
+            />
+          ) : loadingMore ? (
             <ActivityIndicator
               size="small"
               color={colors.accentPink}
